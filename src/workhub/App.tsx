@@ -48,9 +48,10 @@ const sectionIcon: Record<string, IconName> = {
 function App() {
   const [records, setRecords] = useState<WorkRecord[]>([]);
   const [session, setSession] = useState<Awaited<ReturnType<typeof backend.session>>>(null);
+  const [localMode, setLocalMode] = useState(false);
   const [active, setActive] = useState('home');
   const [loading, setLoading] = useState(true);
-  const [syncStatus, setSyncStatus] = useState<'saved' | 'syncing' | 'offline' | 'error'>('saved');
+  const [syncStatus, setSyncStatus] = useState<'saved' | 'syncing' | 'offline' | 'error' | 'local'>('saved');
   const [error, setError] = useState('');
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
@@ -66,6 +67,15 @@ function App() {
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
     try {
+      if (!backendConfigured) {
+        setLocalMode(true);
+        setSession(null);
+        setRecords(await backend.list());
+        setSyncStatus('local');
+        setError('');
+        return;
+      }
+      setLocalMode(false);
       const current = await backend.session();
       setSession(current);
       if (current) {
@@ -94,14 +104,14 @@ function App() {
     return () => window.removeEventListener('keydown', shortcut);
   }, [mobileNav]);
   useEffect(() => {
-    if (!session) return;
+    if (!session || localMode) return;
     const timer = window.setInterval(() => { void load(true); }, 5000);
     const online = () => { setSyncStatus('syncing'); void load(true); };
     const offline = () => setSyncStatus('offline');
     window.addEventListener('online', online);
     window.addEventListener('offline', offline);
     return () => { window.clearInterval(timer); window.removeEventListener('online', online); window.removeEventListener('offline', offline); };
-  }, [session, load]);
+  }, [session, localMode, load]);
 
   useEffect(() => {
     const saved = localStorage.getItem('workhub.appearance.v1');
@@ -126,6 +136,7 @@ function App() {
     setLoginBusy(true); setError('');
     try {
       const nextSession = await backend.signIn(loginEmail.trim(), loginPassword);
+      setLocalMode(false);
       setSession(nextSession);
       setLoginPassword('');
       await load();
@@ -136,12 +147,12 @@ function App() {
 
   async function addRecord(data: RecordData) {
     if (!modalKind) return;
-    setSyncStatus('syncing'); setError('');
+    setSyncStatus(localMode ? 'local' : 'syncing'); setError('');
     try {
       const created = await backend.create({ kind: modalKind, data });
       setRecords((current) => [created, ...current]);
       setModalKind(null);
-      setSyncStatus('saved');
+      setSyncStatus(localMode ? 'local' : 'saved');
     } catch (reason) {
       setSyncStatus(navigator.onLine ? 'error' : 'offline');
       setError(reason instanceof Error ? reason.message : 'Запись не сохранилась.');
@@ -151,11 +162,11 @@ function App() {
 
   async function saveRecord(data: RecordData) {
     if (editingRecord) {
-      setSyncStatus('syncing'); setError('');
+      setSyncStatus(localMode ? 'local' : 'syncing'); setError('');
       try {
         const updated = await backend.update(editingRecord, data);
         setRecords((current) => current.map((item) => item.id === updated.id ? updated : item));
-        setEditingRecord(null); setModalKind(null); setSyncStatus('saved');
+        setEditingRecord(null); setModalKind(null); setSyncStatus(localMode ? 'local' : 'saved');
       } catch (reason) {
         setSyncStatus('error');
         setError(reason instanceof Error ? reason.message : 'Изменение не сохранилось.');
@@ -258,7 +269,7 @@ function App() {
   const globalResults = filteredSearch ? records.filter((record) => JSON.stringify(record.data).toLocaleLowerCase('ru').includes(filteredSearch)) : [];
 
   if (loading) return <div className="launch-screen"><div className="brand-mark">W</div><span>Открываем WorkHub</span></div>;
-  if (!session) return <LoginScreen email={loginEmail} password={loginPassword} setEmail={setLoginEmail} setPassword={setLoginPassword} submit={signIn} busy={loginBusy} error={error} configured={backendConfigured} />;
+  if (!session && !localMode) return <LoginScreen email={loginEmail} password={loginPassword} setEmail={setLoginEmail} setPassword={setLoginPassword} submit={signIn} busy={loginBusy} error={error} configured={backendConfigured} />;
 
   return <div className="app-shell">
     <aside className={`sidebar ${mobileNav ? 'sidebar-open' : ''}`}>
@@ -267,11 +278,12 @@ function App() {
       {filteredSearch ? <div className="nav-group"><div className="nav-label">Результаты поиска</div>{globalResults.length ? globalResults.slice(0, 8).map((record) => <button key={record.id} className="nav-item" onClick={() => { setActive(sectionForKind(record.kind)); setSearch(''); }}><Icon name={sectionIcon[sectionForKind(record.kind)] || 'file'} size={16} /><span>{String(record.data.title || record.data.name || KIND_LABEL[record.kind])}</span></button>) : <div className="search-empty">Ничего не найдено</div>}</div> : <>
         {(['Рабочее', 'Создание', 'Прочее'] as const).map((group) => <div className="nav-group" key={group}><div className="nav-label">{group}</div>{SECTIONS.filter((item) => item.group === group).map((item) => <button key={item.id} className={`nav-item ${active === item.id ? 'active' : ''}`} onClick={() => { setActive(item.id); setMobileNav(false); }}><Icon name={sectionIcon[item.id]} size={16} /><span>{item.label}</span>{item.id === 'tasks' && dueCount(byKind.get('task') || []) > 0 && <i className="nav-count">{dueCount(byKind.get('task') || [])}</i>}</button>)}</div>)}
       </>}
-      <div className="sidebar-bottom"><div className={`sync-indicator ${syncStatus}`}><span className="sync-dot" />{syncLabel(syncStatus)}</div><div className="account-card"><div className="avatar">{session.user.email?.slice(0, 1).toUpperCase() || 'Я'}</div><div className="account-info"><strong>Мое пространство</strong><span>{session.user.email}</span></div><button className="icon-button account-menu" aria-label="Выйти" onClick={() => void signOut()}><Icon name="logout" size={16} /></button></div></div>
+      <div className="sidebar-bottom"><div className={`sync-indicator ${syncStatus}`}><span className="sync-dot" />{syncLabel(syncStatus)}</div><div className="account-card"><div className="avatar">{session?.user.email?.slice(0, 1).toUpperCase() || 'Я'}</div><div className="account-info"><strong>Мое пространство</strong><span>{session?.user.email || (localMode ? 'Этот браузер' : '')}</span></div>{session && <button className="icon-button account-menu" aria-label="Выйти" onClick={() => void signOut()}><Icon name="logout" size={16} /></button>}</div></div>
     </aside>
     <main className="main-content">
       <header className="topbar"><button className="icon-button mobile-menu" aria-label="Открыть меню" onClick={() => setMobileNav((value) => !value)}><Icon name="menu" /></button><div className="breadcrumbs"><span>Рабочее пространство</span><Icon name="chevron" size={14} /><strong>{activeSection.label}</strong></div><div className="topbar-actions"><button className="today-chip" onClick={() => setActive('home')}><Icon name="calendar" size={15} />{new Intl.DateTimeFormat('ru-RU', { weekday: 'short', day: 'numeric', month: 'short' }).format(new Date())}</button><button className="primary-button" onClick={() => setModalKind(defaultKindForSection(active))}><Icon name="plus" size={16} />{createLabel(active)}</button></div></header>
       <div className="page-wrap">
+        {localMode && <div className="notice local-mode-notice" role="status"><span><strong>Данные сохранены в этом браузере.</strong> Сейчас они не синхронизируются между устройствами.</span><span className="local-mode-tag">Локальный режим</span></div>}
         {error && <div className="notice notice-error" role="status"><span>{error}</span><button className="icon-button" aria-label="Закрыть сообщение" onClick={() => setError('')}><Icon name="close" size={16} /></button></div>}
         {active === 'home' && <Dashboard records={records} byKind={byKind} setActive={setActive} toggleTask={toggleTask} month={calendarDate} setMonth={setCalendarDate} onCreate={setModalKind} monthlyGoal={Number(monthlyGoal) || 0} />}
         {active === 'assistant' && <AssistantPage />}
@@ -494,7 +506,7 @@ function kindTabs(section: string): [Kind | 'all', string][] { if (section === '
 function defaultKindForSection(section: string): Kind { return section === 'projects' ? 'project' : section === 'leads' ? 'lead' : section === 'money' ? 'payment' : section === 'content' ? 'content' : section === 'design' ? 'reference' : section === 'materials' ? 'material' : section === 'calculator' ? 'estimate' : 'task'; }
 function createLabel(section: string) { return section === 'home' || section === 'tasks' ? 'Добавить задачу' : section === 'projects' ? 'Создать проект' : section === 'leads' ? 'Добавить клиента' : section === 'money' ? 'Добавить запись' : section === 'content' ? 'Добавить публикацию' : section === 'design' ? 'Добавить референс' : section === 'materials' ? 'Добавить материал' : section === 'calculator' ? 'Новый расчет' : 'Создать'; }
 function sectionDescription(section: string) { return ({ tasks: 'Планируйте работу и держите сроки под контролем.', projects: 'Заказы, клиенты и этапы работы в одном месте.', leads: 'Потенциальные заказчики и следующие действия.', money: 'Поступления, ожидания, расходы, налоги и долги.', content: 'Идеи, черновики и календарь ручных публикаций.', design: 'Референсы по типам блоков и проектам.', materials: 'Документы, ссылки и рабочие заметки.', calculator: 'Сметы проектов и редактируемый прайс.' } as Record<string, string>)[section] || ''; }
-function syncLabel(status: string) { return ({ saved: 'Сохранено', syncing: 'Синхронизация…', offline: 'Нет соединения', error: 'Не удалось сохранить' } as Record<string, string>)[status] || 'Сохранено'; }
+function syncLabel(status: string) { return ({ saved: 'Синхронизировано', syncing: 'Синхронизация…', offline: 'Нет соединения', error: 'Не удалось сохранить', local: 'Локально сохранено' } as Record<string, string>)[status] || 'Сохранено'; }
 function dueCount(tasks: WorkRecord[]) { return tasks.filter((task) => task.data.status !== 'done').length; }
 function priorityRank(value: unknown) { return value === 'high' ? 3 : value === 'normal' ? 2 : value === 'low' ? 1 : 0; }
 function projectName(records: WorkRecord[], id: unknown) { return records.find((record) => record.kind === 'project' && record.id === id)?.data.name as string | undefined; }
