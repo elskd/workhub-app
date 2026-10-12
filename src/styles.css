@@ -29,3 +29,15 @@
 .local-mode-notice>span:first-child{flex:1;min-width:min(100%,260px);line-height:1.5}
 .local-mode-tag{padding:4px 8px;border-radius:999px;background:#eee7d8;color:#78633b;font-size:9px;font-weight:600;white-space:nowrap}
 .sync-indicator.local .sync-dot{background:var(--amber)}
+
+.subtasks-editor{display:grid;gap:8px;padding:12px;border:1px solid var(--line);border-radius:12px;background:var(--surface-soft)}
+.subtasks-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.subtasks-heading>div{display:grid;gap:3px}.subtasks-heading strong{font-size:11px}.subtasks-heading span{color:var(--muted);font-size:9px}
+.subtasks-heading .text-button{min-height:36px}
+.subtask-edit-row{display:grid;grid-template-columns:24px minmax(0,1fr) 32px;align-items:center;gap:8px}
+.subtask-edit-row input[type="checkbox"]{width:18px;height:18px;accent-color:var(--green)}
+.subtask-edit-row input[type="text"]{width:100%;min-width:0;min-height:38px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text);font:inherit;font-size:11px}
+.board-card-title{display:block;width:100%;padding:0;border:0;background:transparent;color:var(--text);font-family:inherit;font-size:12px;font-weight:600;line-height:1.4;text-align:left;cursor:pointer}
+.board-card-title:hover{text-decoration:underline;text-underline-offset:3px}
+.calendar-event{display:block;width:100%;margin-top:3px;padding:3px 5px;border:0;border-radius:5px;background:var(--accent-soft);color:var(--text);font:inherit;font-size:9px;line-height:1.25;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}
+.calendar-event:hover{background:var(--green-soft)}
