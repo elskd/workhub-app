@@ -312,11 +312,11 @@ function Dashboard({ records, byKind, setActive, toggleTask, month, setMonth, on
 }) {
   const today = todayISO();
   const tasks = byKind.get('task') || [];
-  const todayTasks = tasks.filter((task) => task.data.status !== 'done' && (task.data.planned_date === today || task.data.due_date === today));
-  const overdue = tasks.filter((task) => task.data.status !== 'done' && typeof task.data.due_date === 'string' && task.data.due_date < today);
-  const upcoming = tasks.filter((task) => task.data.status !== 'done' && typeof task.data.due_date === 'string' && task.data.due_date >= today && task.data.due_date <= addDays(today, 7)).sort((a, b) => String(a.data.due_date).localeCompare(String(b.data.due_date))).slice(0, 5);
+  const todayTasks = tasks.filter((task) => !['done', 'archived'].includes(String(task.data.status)) && (task.data.planned_date === today || task.data.due_date === today));
+  const overdue = tasks.filter((task) => !['done', 'archived'].includes(String(task.data.status)) && typeof task.data.due_date === 'string' && task.data.due_date < today);
+  const upcoming = tasks.filter((task) => !['done', 'archived'].includes(String(task.data.status)) && typeof task.data.due_date === 'string' && task.data.due_date >= today && task.data.due_date <= addDays(today, 7)).sort((a, b) => String(a.data.due_date).localeCompare(String(b.data.due_date))).slice(0, 5);
   const projects = (byKind.get('project') || []).filter((project) => project.data.status !== 'done' && project.data.status !== 'archived').slice(0, 4);
-  const scheduled = tasks.filter((task) => task.data.status !== 'done' && task.data.planned_date === today && task.data.start_time).sort((a, b) => String(a.data.start_time).localeCompare(String(b.data.start_time)));
+  const scheduled = tasks.filter((task) => !['done', 'archived'].includes(String(task.data.status)) && task.data.planned_date === today && task.data.start_time).sort((a, b) => String(a.data.start_time).localeCompare(String(b.data.start_time)));
   const targetMonth = month.slice(0, 7);
   const income = (byKind.get('payment') || []).filter((payment) => ['received', 'paid'].includes(String(payment.data.status)) && String(payment.data.date || '').slice(0, 7) === targetMonth).reduce((sum, payment) => sum + Number(payment.data.amount || 0), 0);
   const progress = monthlyGoal > 0 ? Math.min(100, income / monthlyGoal * 100) : 0;
@@ -507,7 +507,7 @@ function defaultKindForSection(section: string): Kind { return section === 'proj
 function createLabel(section: string) { return section === 'home' || section === 'tasks' ? 'Добавить задачу' : section === 'projects' ? 'Создать проект' : section === 'leads' ? 'Добавить клиента' : section === 'money' ? 'Добавить запись' : section === 'content' ? 'Добавить публикацию' : section === 'design' ? 'Добавить референс' : section === 'materials' ? 'Добавить материал' : section === 'calculator' ? 'Новый расчет' : 'Создать'; }
 function sectionDescription(section: string) { return ({ tasks: 'Планируйте работу и держите сроки под контролем.', projects: 'Заказы, клиенты и этапы работы в одном месте.', leads: 'Потенциальные заказчики и следующие действия.', money: 'Поступления, ожидания, расходы, налоги и долги.', content: 'Идеи, черновики и календарь ручных публикаций.', design: 'Референсы по типам блоков и проектам.', materials: 'Документы, ссылки и рабочие заметки.', calculator: 'Сметы проектов и редактируемый прайс.' } as Record<string, string>)[section] || ''; }
 function syncLabel(status: string) { return ({ saved: 'Синхронизировано', syncing: 'Синхронизация…', offline: 'Нет соединения', error: 'Не удалось сохранить', local: 'Локально сохранено' } as Record<string, string>)[status] || 'Сохранено'; }
-function dueCount(tasks: WorkRecord[]) { return tasks.filter((task) => task.data.status !== 'done').length; }
+function dueCount(tasks: WorkRecord[]) { return tasks.filter((task) => !['done', 'archived'].includes(String(task.data.status))).length; }
 function priorityRank(value: unknown) { return value === 'high' ? 3 : value === 'normal' ? 2 : value === 'low' ? 1 : 0; }
 function projectName(records: WorkRecord[], id: unknown) { return records.find((record) => record.kind === 'project' && record.id === id)?.data.name as string | undefined; }
 function clientName(records: WorkRecord[], id: unknown) { return records.find((record) => record.kind === 'client' && record.id === id)?.data.name as string | undefined; }
