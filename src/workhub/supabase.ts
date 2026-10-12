@@ -3,6 +3,7 @@ import type { AuthSession, RecordInput, WorkRecord } from './model';
 const API_URL = import.meta.env.VITE_SUPABASE_URL?.replace(/\/$/, '');
 const PUBLISHABLE_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
 const SESSION_KEY = 'workhub.auth.session.v1';
+const LOCAL_RECORDS_KEY = 'workhub.local.records.v1';
 
 export const backendConfigured = Boolean(API_URL && PUBLISHABLE_KEY);
 
@@ -30,6 +31,19 @@ function storeSession(session: AuthSession | null) {
 
 let session = readSession();
 let refreshPromise: Promise<AuthSession | null> | null = null;
+
+function localRecords(): WorkRecord[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(LOCAL_RECORDS_KEY) || '[]');
+    return Array.isArray(parsed) ? parsed as WorkRecord[] : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveLocalRecords(records: WorkRecord[]) {
+  localStorage.setItem(LOCAL_RECORDS_KEY, JSON.stringify(records));
+}
 
 async function authRequest(path: string, body: object) {
   if (!backendConfigured) throw new BackendError('Облачная база еще не подключена.');
@@ -107,8 +121,16 @@ export const backend = {
     session = null;
     storeSession(null);
   },
-  list: () => request('workhub_records?select=id,owner_id,kind,data,revision,created_at,updated_at&order=updated_at.desc') as Promise<WorkRecord[]>,
+  list: () => backendConfigured
+    ? request('workhub_records?select=id,owner_id,kind,data,revision,created_at,updated_at&order=updated_at.desc') as Promise<WorkRecord[]>
+    : Promise.resolve(localRecords().sort((a, b) => b.updated_at.localeCompare(a.updated_at))),
   create: async (input: RecordInput) => {
+    if (!backendConfigured) {
+      const now = new Date().toISOString();
+      const created: WorkRecord = { id: crypto.randomUUID(), owner_id: 'local', kind: input.kind, data: input.data, revision: 1, created_at: now, updated_at: now };
+      saveLocalRecords([created, ...localRecords()]);
+      return created;
+    }
     const current = await activeSession();
     if (!current) throw new BackendError('Войдите, чтобы сохранить запись.', 401);
     const rows = await request('workhub_records?select=id,owner_id,kind,data,revision,created_at,updated_at', {
@@ -118,6 +140,14 @@ export const backend = {
     return rows[0];
   },
   update: async (record: WorkRecord, data: RecordInput['data']) => {
+    if (!backendConfigured) {
+      const records = localRecords();
+      const current = records.find((item) => item.id === record.id);
+      if (!current || current.revision !== record.revision) throw new BackendError('Запись уже изменилась. Обновите список и повторите действие.', 409);
+      const updated = { ...current, data, revision: current.revision + 1, updated_at: new Date().toISOString() };
+      saveLocalRecords(records.map((item) => item.id === updated.id ? updated : item));
+      return updated;
+    }
     const rows = await request(`workhub_records?id=eq.${encodeURIComponent(record.id)}&revision=eq.${record.revision}&select=id,owner_id,kind,data,revision,created_at,updated_at`, {
       method: 'PATCH', headers: { Prefer: 'return=representation' },
       body: JSON.stringify({ data, revision: record.revision + 1, updated_at: new Date().toISOString() }),
