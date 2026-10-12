@@ -325,7 +325,8 @@ function Dashboard({ records, byKind, setActive, toggleTask, month, setMonth, on
     || upcoming.sort((a, b) => priorityRank(b.data.priority) - priorityRank(a.data.priority))[0];
   const monthDate = new Date(`${targetMonth}-01T12:00:00`);
   const completed = tasks.filter((task) => task.data.status === 'done').length;
-  const counts = `${records.length} ${plural(records.length, 'запись', 'записи', 'записей')}`;
+  const activeRecordCount = records.filter((record) => record.data.status !== 'archived').length;
+  const counts = `${activeRecordCount} ${plural(activeRecordCount, 'запись', 'записи', 'записей')}`;
 
   return <>
     <div className="page-heading"><div><div className="eyebrow">{new Intl.DateTimeFormat('ru-RU', { weekday: 'long' }).format(new Date()).toLocaleUpperCase('ru')} · {new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long' }).format(new Date())}</div><h1>Добро пожаловать в WorkHub</h1><p>Вот что происходит в работе сегодня.</p></div><button className="secondary-button" onClick={() => setActive('tasks')}><Icon name="list" size={16} />Открыть задачи</button></div>
