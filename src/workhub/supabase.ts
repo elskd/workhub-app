@@ -45,6 +45,23 @@ function saveLocalRecords(records: WorkRecord[]) {
   localStorage.setItem(LOCAL_RECORDS_KEY, JSON.stringify(records));
 }
 
+function localFileRequest<T>(operation: (store: IDBObjectStore) => IDBRequest<T>) {
+  return new Promise<T>((resolve, reject) => {
+    const opening = indexedDB.open('workhub.local.files.v1', 1);
+    opening.onupgradeneeded = () => opening.result.createObjectStore('files');
+    opening.onerror = () => reject(opening.error || new Error('Не удалось открыть локальное хранилище файлов.'));
+    opening.onsuccess = () => {
+      const database = opening.result;
+      const transaction = database.transaction('files', 'readwrite');
+      const request = operation(transaction.objectStore('files'));
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error('Не удалось обработать файл.'));
+      transaction.oncomplete = () => database.close();
+      transaction.onerror = () => { database.close(); reject(transaction.error || new Error('Не удалось сохранить файл.')); };
+    };
+  });
+}
+
 async function authRequest(path: string, body: object) {
   if (!backendConfigured) throw new BackendError('Облачная база еще не подключена.');
   const response = await fetch(`${API_URL}/auth/v1/${path}`, {
@@ -156,6 +173,12 @@ export const backend = {
     return rows[0];
   },
   upload: async (file: File) => {
+    if (!backendConfigured) {
+      if (file.size > 20 * 1024 * 1024) throw new BackendError('Размер файла не должен превышать 20 МБ.');
+      const path = `local/${crypto.randomUUID()}`;
+      await localFileRequest((store) => store.put(file, path));
+      return path;
+    }
     const current = await activeSession();
     if (!current) throw new BackendError('Войдите, чтобы загрузить файл.', 401);
     if (file.size > 20 * 1024 * 1024) throw new BackendError('Размер файла не должен превышать 20 МБ.');
@@ -171,6 +194,13 @@ export const backend = {
     return path;
   },
   signedFileUrl: async (path: string) => {
+    if (!backendConfigured) {
+      const file = await localFileRequest<File | undefined>((store) => store.get(path));
+      if (!file) throw new BackendError('Локальный файл не найден в этом браузере.');
+      const url = URL.createObjectURL(file);
+      window.setTimeout(() => URL.revokeObjectURL(url), 5 * 60 * 1000);
+      return url;
+    }
     const current = await activeSession();
     if (!current) throw new BackendError('Войдите, чтобы открыть файл.', 401);
     const response = await fetch(`${API_URL}/storage/v1/object/sign/workhub-files/${path.split('/').map(encodeURIComponent).join('/')}`, {
