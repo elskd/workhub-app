@@ -1,0 +1,154 @@
+import type { AuthSession, RecordInput, WorkRecord } from './model';
+
+const API_URL = import.meta.env.VITE_SUPABASE_URL?.replace(/\/$/, '');
+const PUBLISHABLE_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
+const SESSION_KEY = 'workhub.auth.session.v1';
+
+export const backendConfigured = Boolean(API_URL && PUBLISHABLE_KEY);
+
+export class BackendError extends Error {
+  constructor(message: string, public status?: number, public code?: string) {
+    super(message);
+    this.name = 'BackendError';
+  }
+}
+
+function readSession(): AuthSession | null {
+  try {
+    const session = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null') as AuthSession | null;
+    if (!session?.access_token || !session.refresh_token || !session.user?.id) return null;
+    return session;
+  } catch {
+    return null;
+  }
+}
+
+function storeSession(session: AuthSession | null) {
+  if (session) localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  else localStorage.removeItem(SESSION_KEY);
+}
+
+let session = readSession();
+let refreshPromise: Promise<AuthSession | null> | null = null;
+
+async function authRequest(path: string, body: object) {
+  if (!backendConfigured) throw new BackendError('Облачная база еще не подключена.');
+  const response = await fetch(`${API_URL}/auth/v1/${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', apikey: PUBLISHABLE_KEY! },
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new BackendError(payload.msg || payload.message || payload.error_description || 'Не удалось выполнить вход.', response.status, payload.code);
+  return payload;
+}
+
+async function refreshSession() {
+  if (!session?.refresh_token) return null;
+  if (refreshPromise) return refreshPromise;
+  refreshPromise = authRequest('token?grant_type=refresh_token', { refresh_token: session.refresh_token })
+    .then((value) => {
+      session = { ...value, expires_at: Math.floor(Date.now() / 1000) + Number(value.expires_in || 3600) };
+      storeSession(session);
+      return session;
+    })
+    .catch(() => {
+      session = null;
+      storeSession(null);
+      return null;
+    })
+    .finally(() => { refreshPromise = null; });
+  return refreshPromise;
+}
+
+async function activeSession() {
+  if (!session) return null;
+  if (!session.expires_at || session.expires_at - Math.floor(Date.now() / 1000) < 45) return refreshSession();
+  return session;
+}
+
+async function request(path: string, init: RequestInit = {}) {
+  if (!backendConfigured) throw new BackendError('Облачная база еще не подключена.');
+  const current = await activeSession();
+  if (!current) throw new BackendError('Сеанс завершен. Войдите снова.', 401);
+  const headers = new Headers(init.headers);
+  headers.set('apikey', PUBLISHABLE_KEY!);
+  headers.set('Authorization', `Bearer ${current.access_token}`);
+  if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
+  const response = await fetch(`${API_URL}/rest/v1/${path}`, { ...init, headers });
+  if (response.status === 401) {
+    session = null;
+    storeSession(null);
+  }
+  const body = await response.text();
+  const payload = body ? JSON.parse(body) : null;
+  if (!response.ok) throw new BackendError(payload?.message || payload?.hint || 'Не удалось сохранить данные.', response.status, payload?.code);
+  return payload;
+}
+
+export const backend = {
+  session: () => activeSession(),
+  signIn: async (email: string, password: string) => {
+    const value = await authRequest('token?grant_type=password', { email, password });
+    session = { ...value, expires_at: Math.floor(Date.now() / 1000) + Number(value.expires_in || 3600) };
+    storeSession(session);
+    return session;
+  },
+  signOut: async () => {
+    const current = await activeSession();
+    if (current && backendConfigured) {
+      try {
+        await fetch(`${API_URL}/auth/v1/logout`, {
+          method: 'POST',
+          headers: { apikey: PUBLISHABLE_KEY!, Authorization: `Bearer ${current.access_token}` },
+        });
+      } catch { /* local session is cleared regardless */ }
+    }
+    session = null;
+    storeSession(null);
+  },
+  list: () => request('workhub_records?select=id,owner_id,kind,data,revision,created_at,updated_at&order=updated_at.desc') as Promise<WorkRecord[]>,
+  create: async (input: RecordInput) => {
+    const current = await activeSession();
+    if (!current) throw new BackendError('Войдите, чтобы сохранить запись.', 401);
+    const rows = await request('workhub_records?select=id,owner_id,kind,data,revision,created_at,updated_at', {
+      method: 'POST', headers: { Prefer: 'return=representation' },
+      body: JSON.stringify({ owner_id: current.user.id, kind: input.kind, data: input.data }),
+    }) as WorkRecord[];
+    return rows[0];
+  },
+  update: async (record: WorkRecord, data: RecordInput['data']) => {
+    const rows = await request(`workhub_records?id=eq.${encodeURIComponent(record.id)}&revision=eq.${record.revision}&select=id,owner_id,kind,data,revision,created_at,updated_at`, {
+      method: 'PATCH', headers: { Prefer: 'return=representation' },
+      body: JSON.stringify({ data, revision: record.revision + 1, updated_at: new Date().toISOString() }),
+    }) as WorkRecord[];
+    if (!rows.length) throw new BackendError('Эту запись изменили на другом устройстве. Обновите список и выберите актуальную версию.', 409);
+    return rows[0];
+  },
+  upload: async (file: File) => {
+    const current = await activeSession();
+    if (!current) throw new BackendError('Войдите, чтобы загрузить файл.', 401);
+    if (file.size > 20 * 1024 * 1024) throw new BackendError('Размер файла не должен превышать 20 МБ.');
+    const cleanName = file.name.normalize('NFKD').replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(-100) || 'file';
+    const path = `${current.user.id}/${crypto.randomUUID()}-${cleanName}`;
+    const response = await fetch(`${API_URL}/storage/v1/object/workhub-files/${path.split('/').map(encodeURIComponent).join('/')}`, {
+      method: 'POST',
+      headers: { apikey: PUBLISHABLE_KEY!, Authorization: `Bearer ${current.access_token}`, 'Content-Type': file.type || 'application/octet-stream', 'x-upsert': 'false' },
+      body: file,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new BackendError(payload.message || payload.error || 'Не удалось загрузить файл.', response.status, payload.statusCode);
+    return path;
+  },
+  signedFileUrl: async (path: string) => {
+    const current = await activeSession();
+    if (!current) throw new BackendError('Войдите, чтобы открыть файл.', 401);
+    const response = await fetch(`${API_URL}/storage/v1/object/sign/workhub-files/${path.split('/').map(encodeURIComponent).join('/')}`, {
+      method: 'POST', headers: { apikey: PUBLISHABLE_KEY!, Authorization: `Bearer ${current.access_token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expiresIn: 300 }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new BackendError(payload.message || 'Не удалось открыть файл.', response.status, payload.statusCode);
+    return new URL(payload.signedURL, API_URL).toString();
+  },
+};
