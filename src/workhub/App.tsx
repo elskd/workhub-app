@@ -180,13 +180,13 @@ function App() {
   async function archiveRecord(record: WorkRecord) {
     const updated = await backend.update(record, { ...record.data, status: 'archived' });
     setRecords((current) => current.map((item) => item.id === updated.id ? updated : item));
-    setSyncStatus('saved');
+    setSyncStatus(localMode ? 'local' : 'saved');
   }
 
   async function toggleTask(task: WorkRecord) {
     const next = { ...task.data, status: task.data.status === 'done' ? 'todo' : 'done' };
     setRecords((current) => current.map((item) => item.id === task.id ? { ...item, data: next } : item));
-    setSyncStatus('syncing');
+    setSyncStatus(localMode ? 'local' : 'syncing');
     try {
       const updated = await backend.update(task, next);
       setRecords((current) => current.map((item) => item.id === task.id ? updated : item));
@@ -198,7 +198,7 @@ function App() {
           setRecords((current) => [followup, ...current]);
         }
       }
-      setSyncStatus('saved'); setError('');
+      setSyncStatus(localMode ? 'local' : 'saved'); setError('');
     } catch (reason) {
       setSyncStatus('error');
       setError(reason instanceof Error ? reason.message : 'Изменение не сохранилось.');
@@ -207,7 +207,7 @@ function App() {
   }
 
   async function convertLead(lead: WorkRecord) {
-    setSyncStatus('syncing'); setError('');
+    setSyncStatus(localMode ? 'local' : 'syncing'); setError('');
     try {
       let client = records.find((record) => record.kind === 'client' && record.data.source_lead_id === lead.id);
       if (!client) {
@@ -216,7 +216,7 @@ function App() {
       }
       const updated = await backend.update(lead, { ...lead.data, status: 'converted', converted_client_id: client.id });
       setRecords((current) => [client!, ...current.filter((item) => item.id !== client!.id).map((item) => item.id === updated.id ? updated : item)]);
-      setSyncStatus('saved');
+      setSyncStatus(localMode ? 'local' : 'saved');
     } catch (reason) {
       setSyncStatus('error');
       setError(reason instanceof Error ? reason.message : 'Не удалось перенести контакт в клиенты.');
@@ -224,7 +224,7 @@ function App() {
   }
 
   async function receiveExpectedPayment(expected: WorkRecord) {
-    setSyncStatus('syncing'); setError('');
+    setSyncStatus(localMode ? 'local' : 'syncing'); setError('');
     try {
       let payment = records.find((record) => record.kind === 'payment' && record.data.source_expected_id === expected.id);
       if (!payment) {
@@ -233,7 +233,7 @@ function App() {
       }
       const updated = await backend.update(expected, { ...expected.data, status: 'received', converted_payment_id: payment.id });
       setRecords((current) => [payment!, ...current.filter((item) => item.id !== payment!.id).map((item) => item.id === updated.id ? updated : item)]);
-      setSyncStatus('saved');
+      setSyncStatus(localMode ? 'local' : 'saved');
     } catch (reason) {
       setSyncStatus('error');
       setError(reason instanceof Error ? reason.message : 'Не удалось перенести оплату в поступления.');
@@ -513,7 +513,7 @@ function projectName(records: WorkRecord[], id: unknown) { return records.find((
 function clientName(records: WorkRecord[], id: unknown) { return records.find((record) => record.kind === 'client' && record.id === id)?.data.name as string | undefined; }
 function addDays(value: string, count: number) { const date = new Date(`${value}T12:00:00`); date.setDate(date.getDate() + count); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; }
 function parseEstimateLines(value: string) { return value.split(/\n+/).map((line) => line.split(/[;\t|]/).map((part) => part.trim())).filter((parts) => parts[0] && Number(parts[1]) > 0 && Number(parts[2]) >= 0).map(([name, quantity, unit_price]) => ({ name, quantity: Number(quantity), unit_price: Number(unit_price) })); }
-function nextDate(value: string, interval: string) { const date = new Date(`${value}T12:00:00`); if (interval === 'daily') date.setDate(date.getDate() + 1); else if (interval === 'weekly') date.setDate(date.getDate() + 7); else if (interval === 'monthly') date.setMonth(date.getMonth() + 1); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; }
+function nextDate(value: string, interval: string) { const date = new Date(`${value}T12:00:00`); if (interval === 'daily') date.setDate(date.getDate() + 1); else if (interval === 'weekly') date.setDate(date.getDate() + 7); else if (interval === 'monthly') { const day = date.getDate(); date.setDate(1); date.setMonth(date.getMonth() + 1); date.setDate(Math.min(day, new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate())); } return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; }
 function addMonth(value: string, delta: number) { const date = new Date(`${value.slice(0, 7)}-01T12:00:00`); date.setMonth(date.getMonth() + delta); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-01`; }
 function plural(value: number, one: string, few: string, many: string) { const ten = value % 10; const hundred = value % 100; return hundred >= 11 && hundred <= 14 ? many : ten === 1 ? one : ten >= 2 && ten <= 4 ? few : many; }
 function projectStageLabel(value: unknown) { const index = typeof value === 'string' ? Number(value.replace('stage_', '')) : -1; return Number.isInteger(index) && index >= 0 && projectStageOptions[index] ? projectStageOptions[index].label : typeof value === 'string' && value ? value : 'Первый контакт'; }
