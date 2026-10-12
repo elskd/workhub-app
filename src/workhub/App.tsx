@@ -366,18 +366,19 @@ function RecordPage({ section, records, allRecords, toggleTask, onCreate, onEdit
   const [filter, setFilter] = useState('all');
   const [kindFilter, setKindFilter] = useState<Kind | 'all'>(section === 'projects' ? 'project' : section === 'calculator' ? 'estimate' : 'all');
   const sectionInfo = SECTIONS.find((item) => item.id === section)!;
-  const filteredRecords = section === 'projects' || section === 'calculator' || section === 'money' ? records.filter((record) => kindFilter === 'all' || record.kind === kindFilter) : records;
+  const activeRecords = records.filter((record) => record.data.status !== 'archived');
+  const filteredRecords = section === 'projects' || section === 'calculator' || section === 'money' ? activeRecords.filter((record) => kindFilter === 'all' || record.kind === kindFilter) : activeRecords;
   const visible = filteredRecords.filter((record) => {
-    if (filter === 'all') return record.data.status !== 'archived';
+    if (filter === 'all') return true;
     if (filter === 'done') return record.data.status === 'done' || record.data.status === 'published';
     if (filter === 'open') return record.data.status !== 'done' && record.data.status !== 'archived';
     return String(record.data.status || 'new') === filter;
   }).sort((a, b) => String(a.data.due_date || a.data.date || a.created_at).localeCompare(String(b.data.due_date || b.data.date || b.created_at)));
   const addKind = kindFilter === 'all' ? defaultKindForSection(section) : kindFilter;
-  const count = records.length;
+  const count = filteredRecords.length;
   return <>
     <div className="page-heading section-page-heading"><div><div className="eyebrow">РАБОЧЕЕ ПРОСТРАНСТВО</div><h1>{sectionInfo.label}</h1><p>{sectionDescription(section)} <span className="record-count">{count} {plural(count, 'запись', 'записи', 'записей')}</span></p></div><button className="primary-button" onClick={() => onCreate(addKind)}><Icon name="plus" size={16} />{kindFilter === 'client' ? 'Добавить клиента' : createLabel(section)}</button></div>
-    {(section === 'projects' || section === 'money' || section === 'calculator') && <div className="kind-tabs" aria-label="Тип записей">{kindTabs(section).map(([kind, label]) => <button key={kind} className={kindFilter === kind ? 'selected' : ''} onClick={() => setKindFilter(kind)}>{label}{kind !== 'all' && <span>{records.filter((record) => record.kind === kind).length}</span>}</button>)}</div>}
+    {(section === 'projects' || section === 'money' || section === 'calculator') && <div className="kind-tabs" aria-label="Тип записей">{kindTabs(section).map(([kind, label]) => <button key={kind} className={kindFilter === kind ? 'selected' : ''} onClick={() => setKindFilter(kind)}>{label}{kind !== 'all' && <span>{activeRecords.filter((record) => record.kind === kind).length}</span>}</button>)}</div>}
     <div className="records-toolbar"><div className="segmented-control"><button className={filter === 'all' ? 'selected' : ''} onClick={() => setFilter('all')}>Все <span>{filteredRecords.length}</span></button><button className={filter === 'open' ? 'selected' : ''} onClick={() => setFilter('open')}>В работе</button><button className={filter === 'done' ? 'selected' : ''} onClick={() => setFilter('done')}>Завершено</button></div><div className="toolbar-right"><div className="view-switch"><button className={view === 'list' ? 'selected' : ''} aria-label="Список" onClick={() => setView('list')}><Icon name="list" size={16} /></button><button className={view === 'board' ? 'selected' : ''} aria-label="Доска" onClick={() => setView('board')}><Icon name="board" size={16} /></button>{section === 'content' || section === 'tasks' ? <button className={view === 'calendar' ? 'selected' : ''} aria-label="Календарь" onClick={() => setView('calendar')}><Icon name="calendar" size={16} /></button> : null}</div></div></div>
     {visible.length ? view === 'board' ? <RecordBoard records={visible} toggleTask={toggleTask} onEdit={onEdit} /> : view === 'calendar' ? <SimpleCalendar records={visible} onEdit={onEdit} /> : <div className="record-table"><div className="table-head"><span>НАЗВАНИЕ</span><span>СТАТУС</span><span>{section === 'money' ? 'СУММА' : 'СРОК'}</span><span>СВЯЗАНО С</span><span /></div>{visible.map((record) => <RecordLine key={record.id} record={record} records={allRecords} toggleTask={toggleTask} onEdit={onEdit} onArchive={onArchive} onConvert={onConvert} onReceive={onReceive} onNewRevision={onNewRevision} onOpenFile={onOpenFile} />)}</div> : <EmptyState section={section} onCreate={() => onCreate(addKind)} />}
   </>;
