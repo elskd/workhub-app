@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { FormEvent } from 'react';
+import type { DragEvent, FormEvent } from 'react';
 import type { Kind, RecordData, WorkRecord } from './model';
 import { backendConfigured, backend } from './supabase';
 import { formatDate, KIND_LABEL, money, SECTION_KINDS, SECTIONS, todayISO } from './model';
@@ -58,6 +58,9 @@ function App() {
   const [loginBusy, setLoginBusy] = useState(false);
   const [modalKind, setModalKind] = useState<Kind | null>(null);
   const [editingRecord, setEditingRecord] = useState<WorkRecord | null>(null);
+  const [convertingLead, setConvertingLead] = useState<WorkRecord | null>(null);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [recordDefaults, setRecordDefaults] = useState<RecordData | undefined>();
   const [search, setSearch] = useState('');
   const [mobileNav, setMobileNav] = useState(false);
   const [calendarDate, setCalendarDate] = useState(todayISO());
@@ -151,7 +154,7 @@ function App() {
     try {
       const created = await backend.create({ kind: modalKind, data });
       setRecords((current) => [created, ...current]);
-      setModalKind(null);
+      setModalKind(null); setRecordDefaults(undefined);
       setSyncStatus(localMode ? 'local' : 'saved');
     } catch (reason) {
       setSyncStatus(navigator.onLine ? 'error' : 'offline');
@@ -162,19 +165,30 @@ function App() {
 
   async function saveRecord(data: RecordData) {
     if (editingRecord) {
-      setSyncStatus(localMode ? 'local' : 'syncing'); setError('');
       try {
-        const updated = await backend.update(editingRecord, data);
-        setRecords((current) => current.map((item) => item.id === updated.id ? updated : item));
+        await updateExistingRecord(editingRecord, data);
         setEditingRecord(null); setModalKind(null); setSyncStatus(localMode ? 'local' : 'saved');
       } catch (reason) {
-        setSyncStatus('error');
-        setError(reason instanceof Error ? reason.message : 'Изменение не сохранилось.');
         throw reason;
       }
       return;
     }
     await addRecord(data);
+  }
+
+  async function updateExistingRecord(record: WorkRecord, data: RecordData) {
+    setSyncStatus(localMode ? 'local' : 'syncing'); setError('');
+    try {
+      const updated = await backend.update(record, data);
+      setRecords((current) => current.map((item) => item.id === updated.id ? updated : item));
+      setSyncStatus(localMode ? 'local' : 'saved'); setError('');
+      return updated;
+    } catch (reason) {
+      setSyncStatus(navigator.onLine ? 'error' : 'offline');
+      const message = reason instanceof Error ? reason.message : 'Изменение не сохранилось.';
+      setError(message);
+      throw reason instanceof Error ? reason : new Error(message);
+    }
   }
 
   async function archiveRecord(record: WorkRecord) {
@@ -206,20 +220,39 @@ function App() {
     }
   }
 
-  async function convertLead(lead: WorkRecord) {
+  async function convertLead(lead: WorkRecord, clientId: string, projectTitle: string, service: string) {
     setSyncStatus(localMode ? 'local' : 'syncing'); setError('');
     try {
-      let client = records.find((record) => record.kind === 'client' && record.data.source_lead_id === lead.id);
-      if (!client) {
-        client = await backend.create({ kind: 'client', data: { name: String(lead.data.name || ''), email: String(lead.data.email || ''), phone: String(lead.data.phone || ''), source_lead_id: lead.id, notes: String(lead.data.notes || '') } });
-        setRecords((current) => [client!, ...current]);
+      const latestRecords = await backend.list();
+      setRecords(latestRecords);
+      const existingProject = latestRecords.find((record) => record.kind === 'project' && record.data.source_lead_id === lead.id);
+      let client = latestRecords.find((record) => record.kind === 'client' && record.id === clientId)
+        || latestRecords.find((record) => record.kind === 'client' && record.data.source_lead_id === lead.id);
+      if (existingProject) {
+        const updated = await backend.update(lead, { ...lead.data, status: 'converted', converted_client_id: existingProject.data.client_id, converted_project_id: existingProject.id });
+        setRecords((current) => current.map((item) => item.id === updated.id ? updated : item));
+        setConvertingLead(null); setSelectedProjectId(existingProject.id); setActive('projects'); setSyncStatus(localMode ? 'local' : 'saved');
+        return;
       }
-      const updated = await backend.update(lead, { ...lead.data, status: 'converted', converted_client_id: client.id });
-      setRecords((current) => [client!, ...current.filter((item) => item.id !== client!.id).map((item) => item.id === updated.id ? updated : item)]);
-      setSyncStatus(localMode ? 'local' : 'saved');
+      if (!client) {
+        client = await backend.create({ kind: 'client', data: {
+          name: String(lead.data.name || ''), email: String(lead.data.email || ''), phone: String(lead.data.phone || ''),
+          messenger: String(lead.data.messenger || ''), website: String(lead.data.website || ''), source_lead_id: lead.id,
+        } });
+        setRecords((current) => [client!, ...current.filter((item) => item.id !== client!.id)]);
+      }
+      const project = await backend.create({ kind: 'project', data: {
+        name: projectTitle.trim(), client_id: client.id, service, source_lead_id: lead.id,
+        stage: lead.data.status === 'agreed' ? 'stage_1' : 'stage_0', status: 'active',
+      } });
+      const updated = await backend.update(lead, { ...lead.data, status: 'converted', converted_client_id: client.id, converted_project_id: project.id });
+      setRecords((current) => [project, ...current.filter((item) => item.id !== project.id && item.id !== client!.id && item.id !== updated.id), ...(client!.created_at ? [client!] : []), updated]);
+      setConvertingLead(null); setSelectedProjectId(project.id); setActive('projects'); setSyncStatus(localMode ? 'local' : 'saved');
     } catch (reason) {
       setSyncStatus('error');
-      setError(reason instanceof Error ? reason.message : 'Не удалось перенести контакт в клиенты.');
+      const message = reason instanceof Error ? reason.message : 'Не удалось создать проект из лида.';
+      setError(message);
+      throw new Error(message);
     }
   }
 
@@ -281,18 +314,20 @@ function App() {
       <div className="sidebar-bottom"><div className={`sync-indicator ${syncStatus}`}><span className="sync-dot" />{syncLabel(syncStatus)}</div><div className="account-card"><div className="avatar">{session?.user.email?.slice(0, 1).toUpperCase() || 'Я'}</div><div className="account-info"><strong>Мое пространство</strong><span>{session?.user.email || (localMode ? 'Этот браузер' : '')}</span></div>{session && <button className="icon-button account-menu" aria-label="Выйти" onClick={() => void signOut()}><Icon name="logout" size={16} /></button>}</div></div>
     </aside>
     <main className="main-content">
-      <header className="topbar"><button className="icon-button mobile-menu" aria-label="Открыть меню" onClick={() => setMobileNav((value) => !value)}><Icon name="menu" /></button><div className="breadcrumbs"><span>Рабочее пространство</span><Icon name="chevron" size={14} /><strong>{activeSection.label}</strong></div><div className="topbar-actions"><button className="today-chip" onClick={() => setActive('home')}><Icon name="calendar" size={15} />{new Intl.DateTimeFormat('ru-RU', { weekday: 'short', day: 'numeric', month: 'short' }).format(new Date())}</button>{!['settings', 'assistant'].includes(active) && <button className="primary-button" onClick={() => setModalKind(defaultKindForSection(active))}><Icon name="plus" size={16} />{createLabel(active)}</button>}</div></header>
+      <header className="topbar"><button className="icon-button mobile-menu" aria-label="Открыть меню" onClick={() => setMobileNav((value) => !value)}><Icon name="menu" /></button><div className="breadcrumbs"><span>Рабочее пространство</span><Icon name="chevron" size={14} /><strong>{activeSection.label}</strong></div><div className="topbar-actions"><button className="today-chip" onClick={() => setActive('home')}><Icon name="calendar" size={15} />{new Intl.DateTimeFormat('ru-RU', { weekday: 'short', day: 'numeric', month: 'short' }).format(new Date())}</button>{active === 'home' && <button className="primary-button" onClick={() => setModalKind('task')}><Icon name="plus" size={16} />{createLabel('tasks')}</button>}</div></header>
       <div className="page-wrap">
         {localMode && <div className="notice local-mode-notice" role="status"><span><strong>Данные сохранены в этом браузере.</strong> Сейчас они не синхронизируются между устройствами.</span><span className="local-mode-tag">Локальный режим</span></div>}
         {error && <div className="notice notice-error" role="status"><span>{error}</span><button className="icon-button" aria-label="Закрыть сообщение" onClick={() => setError('')}><Icon name="close" size={16} /></button></div>}
         {active === 'home' && <Dashboard records={records} byKind={byKind} setActive={setActive} toggleTask={toggleTask} month={calendarDate} setMonth={setCalendarDate} onCreate={setModalKind} monthlyGoal={Number(monthlyGoal) || 0} />}
         {active === 'assistant' && <AssistantPage />}
         {active === 'settings' && <SettingsPage localMode={localMode} onSignOut={() => void signOut()} monthlyGoal={monthlyGoal} setMonthlyGoal={(value) => { setMonthlyGoal(value); localStorage.setItem('workhub.monthlyGoal.v1', value); }} />}
-        {active !== 'home' && active !== 'assistant' && active !== 'settings' && <RecordPage section={active} records={records.filter((record) => SECTION_KINDS[active]?.includes(record.kind) || (active === 'projects' && record.kind === 'client'))} allRecords={records} toggleTask={toggleTask} onCreate={(kind) => { setEditingRecord(null); setModalKind(kind); }} onEdit={(record) => { setEditingRecord(record); setModalKind(record.kind); }} onArchive={(record) => void archiveRecord(record).catch((reason) => setError(reason instanceof Error ? reason.message : 'Не удалось убрать запись в архив.'))} onConvert={convertLead} onReceive={receiveExpectedPayment} onNewRevision={createEstimateRevision} onOpenFile={openMaterial} />}
+      {active === 'projects' && selectedProjectId && records.find((record) => record.kind === 'project' && record.id === selectedProjectId) && <ProjectWorkspace project={records.find((record) => record.kind === 'project' && record.id === selectedProjectId)!} records={records} onBack={() => setSelectedProjectId(null)} onEdit={(record) => { setEditingRecord(record); setRecordDefaults(undefined); setModalKind(record.kind); }} onEditRelated={(record) => { setEditingRecord(record); setRecordDefaults(undefined); setModalKind(record.kind); }} onAddRelated={(kind, project) => { setEditingRecord(null); setRecordDefaults({ project_id: project.id }); setModalKind(kind); }} onStageChange={(project, stage) => { const isComplete = projectStageIndex(stage) === projectStageOptions.length - 1; void updateExistingRecord(project, { ...project.data, stage, status: isComplete ? 'done' : project.data.status === 'done' ? 'active' : project.data.status }).catch(() => undefined); }} />}
+      {active !== 'home' && active !== 'assistant' && active !== 'settings' && !(active === 'projects' && selectedProjectId && records.some((record) => record.kind === 'project' && record.id === selectedProjectId)) && <RecordPage section={active} records={records.filter((record) => SECTION_KINDS[active]?.includes(record.kind) || (active === 'projects' && record.kind === 'client'))} allRecords={records} toggleTask={toggleTask} onCreate={(kind) => { setEditingRecord(null); setRecordDefaults(undefined); setModalKind(kind); }} onEdit={(record) => { setEditingRecord(record); setRecordDefaults(undefined); setModalKind(record.kind); }} onOpenProject={(project) => setSelectedProjectId(project.id)} onStatusChange={(record, status) => { void updateExistingRecord(record, { ...record.data, status }).catch(() => undefined); }} onProjectStageChange={(project, stage) => { const isComplete = projectStageIndex(stage) === projectStageOptions.length - 1; void updateExistingRecord(project, { ...project.data, stage, status: isComplete ? 'done' : project.data.status === 'done' ? 'active' : project.data.status }).catch(() => undefined); }} onArchive={(record) => void archiveRecord(record).catch((reason) => setError(reason instanceof Error ? reason.message : 'Не удалось убрать запись в архив.'))} onConvert={(lead) => setConvertingLead(lead)} onReceive={receiveExpectedPayment} onNewRevision={createEstimateRevision} onOpenFile={openMaterial} />}
       </div>
     </main>
     {mobileNav && <button className="scrim" aria-label="Закрыть меню" onClick={() => setMobileNav(false)} />}
-    {modalKind && <RecordModal key={`${modalKind}-${editingRecord?.id || 'new'}`} kind={modalKind} records={records} initialData={editingRecord?.data} editing={Boolean(editingRecord)} onClose={() => { setModalKind(null); setEditingRecord(null); }} onSave={saveRecord} />}
+    {modalKind && <RecordModal key={`${modalKind}-${editingRecord?.id || 'new'}`} kind={modalKind} records={records} initialData={editingRecord?.data || recordDefaults} editing={Boolean(editingRecord)} onClose={() => { setModalKind(null); setEditingRecord(null); setRecordDefaults(undefined); }} onSave={saveRecord} />}
+    {convertingLead && <LeadConversionModal lead={convertingLead} records={records} onClose={() => setConvertingLead(null)} onSave={convertLead} />}
     <nav className="mobile-bottom-nav" aria-label="Быстрая навигация">{['home', 'tasks', 'projects', 'money', 'more'].map((id) => <button key={id} className={active === id || (id === 'more' && !['home', 'tasks', 'projects', 'money'].includes(active)) ? 'active' : ''} onClick={() => id === 'more' ? setMobileNav(true) : setActive(id)} aria-label={id === 'more' ? 'Еще разделы' : SECTIONS.find((section) => section.id === id)?.label}><Icon name={id === 'more' ? 'more' : sectionIcon[id]} size={20} /><span>{id === 'more' ? 'Еще' : SECTIONS.find((section) => section.id === id)?.label}</span></button>)}</nav>
   </div>;
 }
@@ -362,7 +397,7 @@ function TaskRow({ task, toggle, late = false }: { task: WorkRecord; toggle: (ta
   return <div className={`task-row ${late ? 'task-late' : ''}`}><button className={`task-check ${task.data.status === 'done' ? 'checked' : ''}`} aria-label={task.data.status === 'done' ? 'Вернуть задачу в работу' : 'Отметить выполненной'} onClick={() => void toggle(task)}>{task.data.status === 'done' && <Icon name="check" size={13} />}</button><div className="task-main"><strong className={task.data.status === 'done' ? 'task-done' : ''}>{String(task.data.title || 'Без названия')}</strong><span>{subtasks.length ? `${done}/${subtasks.length} подзадач` : String(task.data.project_name || (late ? `Просрочено · ${formatDate(task.data.due_date)}` : ''))}</span></div><div className="task-meta">{task.data.start_time && <span><Icon name="clock" size={13} />{String(task.data.start_time)}</span>}{task.data.priority && <span className={`priority-dot priority-${String(task.data.priority)}`} title={`Приоритет: ${String(task.data.priority)}`} />}</div></div>;
 }
 
-function RecordPage({ section, records, allRecords, toggleTask, onCreate, onEdit, onArchive, onConvert, onReceive, onNewRevision, onOpenFile }: { section: string; records: WorkRecord[]; allRecords: WorkRecord[]; toggleTask: (task: WorkRecord) => void; onCreate: (kind: Kind) => void; onEdit: (record: WorkRecord) => void; onArchive: (record: WorkRecord) => void; onConvert: (record: WorkRecord) => void; onReceive: (record: WorkRecord) => void; onNewRevision: (record: WorkRecord) => void; onOpenFile: (record: WorkRecord) => void }) {
+function RecordPage({ section, records, allRecords, toggleTask, onCreate, onEdit, onOpenProject, onStatusChange, onProjectStageChange, onArchive, onConvert, onReceive, onNewRevision, onOpenFile }: { section: string; records: WorkRecord[]; allRecords: WorkRecord[]; toggleTask: (task: WorkRecord) => void; onCreate: (kind: Kind) => void; onEdit: (record: WorkRecord) => void; onOpenProject: (record: WorkRecord) => void; onStatusChange: (record: WorkRecord, status: string) => void; onProjectStageChange: (project: WorkRecord, stage: string) => void; onArchive: (record: WorkRecord) => void; onConvert: (record: WorkRecord) => void; onReceive: (record: WorkRecord) => void; onNewRevision: (record: WorkRecord) => void; onOpenFile: (record: WorkRecord) => void }) {
   const [view, setView] = useState<'list' | 'board' | 'calendar'>('list');
   const [filter, setFilter] = useState('all');
   const [kindFilter, setKindFilter] = useState<Kind | 'all'>(section === 'projects' ? 'project' : section === 'calculator' ? 'estimate' : 'all');
@@ -381,16 +416,17 @@ function RecordPage({ section, records, allRecords, toggleTask, onCreate, onEdit
     <div className="page-heading section-page-heading"><div><div className="eyebrow">РАБОЧЕЕ ПРОСТРАНСТВО</div><h1>{sectionInfo.label}</h1><p>{sectionDescription(section)} <span className="record-count">{count} {plural(count, 'запись', 'записи', 'записей')}</span></p></div><button className="primary-button" onClick={() => onCreate(addKind)}><Icon name="plus" size={16} />{kindFilter === 'client' ? 'Добавить клиента' : createLabel(section)}</button></div>
     {(section === 'projects' || section === 'money' || section === 'calculator') && <div className="kind-tabs" aria-label="Тип записей">{kindTabs(section).map(([kind, label]) => <button key={kind} className={kindFilter === kind ? 'selected' : ''} onClick={() => setKindFilter(kind)}>{label}{kind !== 'all' && <span>{activeRecords.filter((record) => record.kind === kind).length}</span>}</button>)}</div>}
     <div className="records-toolbar"><div className="segmented-control"><button className={filter === 'all' ? 'selected' : ''} onClick={() => setFilter('all')}>Все <span>{filteredRecords.length}</span></button><button className={filter === 'open' ? 'selected' : ''} onClick={() => setFilter('open')}>В работе</button><button className={filter === 'done' ? 'selected' : ''} onClick={() => setFilter('done')}>Завершено</button></div><div className="toolbar-right"><div className="view-switch"><button className={view === 'list' ? 'selected' : ''} aria-label="Список" onClick={() => setView('list')}><Icon name="list" size={16} /></button><button className={view === 'board' ? 'selected' : ''} aria-label="Доска" onClick={() => setView('board')}><Icon name="board" size={16} /></button>{section === 'content' || section === 'tasks' ? <button className={view === 'calendar' ? 'selected' : ''} aria-label="Календарь" onClick={() => setView('calendar')}><Icon name="calendar" size={16} /></button> : null}</div></div></div>
-    {visible.length ? view === 'board' ? <RecordBoard records={visible} toggleTask={toggleTask} onEdit={onEdit} /> : view === 'calendar' ? <SimpleCalendar records={visible} onEdit={onEdit} /> : <div className="record-table"><div className="table-head"><span>НАЗВАНИЕ</span><span>СТАТУС</span><span>{section === 'money' ? 'СУММА' : 'СРОК'}</span><span>СВЯЗАНО С</span><span /></div>{visible.map((record) => <RecordLine key={record.id} record={record} records={allRecords} toggleTask={toggleTask} onEdit={onEdit} onArchive={onArchive} onConvert={onConvert} onReceive={onReceive} onNewRevision={onNewRevision} onOpenFile={onOpenFile} />)}</div> : <EmptyState section={section} onCreate={() => onCreate(addKind)} />}
+    {visible.length ? view === 'board' ? section === 'projects' && kindFilter === 'project' ? <ProjectStageBoard records={visible} allRecords={allRecords} onOpenProject={onOpenProject} onStageChange={onProjectStageChange} /> : <RecordBoard records={visible} toggleTask={toggleTask} onEdit={onEdit} onStatusChange={onStatusChange} /> : view === 'calendar' ? <SimpleCalendar records={visible} onEdit={onEdit} /> : <div className="record-table"><div className="table-head"><span>НАЗВАНИЕ</span><span>СТАТУС</span><span>{section === 'money' ? 'СУММА' : 'СРОК'}</span><span>СВЯЗАНО С</span><span /></div>{visible.map((record) => <RecordLine key={record.id} record={record} records={allRecords} toggleTask={toggleTask} onEdit={onEdit} onOpenProject={onOpenProject} onArchive={onArchive} onConvert={onConvert} onReceive={onReceive} onNewRevision={onNewRevision} onOpenFile={onOpenFile} />)}</div> : <EmptyState section={section} onCreate={() => onCreate(addKind)} />}
   </>;
 }
 
-function RecordLine({ record, records, toggleTask, onEdit, onArchive, onConvert, onReceive, onNewRevision, onOpenFile }: { record: WorkRecord; records: WorkRecord[]; toggleTask: (task: WorkRecord) => void; onEdit: (record: WorkRecord) => void; onArchive: (record: WorkRecord) => void; onConvert: (record: WorkRecord) => void; onReceive: (record: WorkRecord) => void; onNewRevision: (record: WorkRecord) => void; onOpenFile: (record: WorkRecord) => void }) {
+function RecordLine({ record, records, toggleTask, onEdit, onOpenProject, onArchive, onConvert, onReceive, onNewRevision, onOpenFile }: { record: WorkRecord; records: WorkRecord[]; toggleTask: (task: WorkRecord) => void; onEdit: (record: WorkRecord) => void; onOpenProject: (record: WorkRecord) => void; onArchive: (record: WorkRecord) => void; onConvert: (record: WorkRecord) => void; onReceive: (record: WorkRecord) => void; onNewRevision: (record: WorkRecord) => void; onOpenFile: (record: WorkRecord) => void }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const title = String(record.data.title || record.data.name || record.data.company || KIND_LABEL[record.kind]);
   const subtasks = record.kind === 'task' ? readSubtasks(record.data.subtasks) : [];
   const progress = subtasks.length ? `${subtasks.filter((item) => item.done).length}/${subtasks.length} подзадач` : '';
-  return <div className="record-line"><div className="record-title-cell">{record.kind === 'task' && <button className={`task-check small ${record.data.status === 'done' ? 'checked' : ''}`} aria-label="Изменить выполнение" onClick={() => void toggleTask(record)}>{record.data.status === 'done' && <Icon name="check" size={12} />}</button>}<span className="record-kind-icon"><Icon name={sectionIcon[sectionForKind(record.kind)] || 'file'} size={16} /></span><div><strong>{title}{record.kind === 'estimate' && Number(record.data.revision_number || 1) > 1 ? ` · v${record.data.revision_number}` : ''}</strong><small>{String(record.data.description || record.data.service || record.data.format || record.data.file_name || KIND_LABEL[record.kind])}{progress && <span className="subtask-progress"> · {progress}</span>}</small></div></div><span><StatusChip status={String(record.data.status || record.data.stage || 'new')} /></span><span className="record-date">{record.kind === 'payment' || record.kind === 'expense' || record.kind === 'expected_payment' || record.kind === 'tax' || record.kind === 'debt' ? money(record.data.amount) : record.kind === 'estimate' ? money(record.data.total) : formatDate(record.data.due_date || record.data.date)}</span><span className="record-related">{projectName(records, record.data.project_id) || clientName(records, record.data.client_id) || String(record.data.channel || '—')}</span><div className="row-action-wrap"><button className="icon-button row-more" aria-label={`Действия: ${title}`} aria-expanded={menuOpen} onClick={() => setMenuOpen((value) => !value)}><Icon name="more" size={16} /></button>{menuOpen && <div className="row-menu">{record.kind === 'material' && typeof record.data.file_path === 'string' && <button onClick={() => onOpenFile(record)}>Открыть файл</button>}{record.kind === 'lead' && record.data.status !== 'converted' && <button onClick={() => onConvert(record)}>Перенести в клиенты</button>}{record.kind === 'expected_payment' && record.data.status === 'expected' && <button onClick={() => onReceive(record)}>Отметить как полученную</button>}{record.kind === 'estimate' && <button onClick={() => onNewRevision(record)}>Новая версия</button>}{(record.kind !== 'estimate' || !['sent', 'approved', 'superseded'].includes(String(record.data.status))) && <button onClick={() => onEdit(record)}>Изменить</button>}<button onClick={() => onArchive(record)}>В архив</button></div>}</div></div>;
+  const titleDetails = <><strong>{title}{record.kind === 'estimate' && Number(record.data.revision_number || 1) > 1 ? ` · v${record.data.revision_number}` : ''}</strong><small>{String(record.data.description || record.data.service || record.data.format || record.data.file_name || KIND_LABEL[record.kind])}{progress && <span className="subtask-progress"> · {progress}</span>}</small></>;
+  return <div className="record-line"><div className="record-title-cell">{record.kind === 'task' && <button className={`task-check small ${record.data.status === 'done' ? 'checked' : ''}`} aria-label="Изменить выполнение" onClick={() => void toggleTask(record)}>{record.data.status === 'done' && <Icon name="check" size={12} />}</button>}<span className="record-kind-icon"><Icon name={sectionIcon[sectionForKind(record.kind)] || 'file'} size={16} /></span>{record.kind === 'project' ? <button className="record-title-open" onClick={() => onOpenProject(record)}>{titleDetails}</button> : <div>{titleDetails}</div>}</div><span><StatusChip status={String(record.data.status || record.data.stage || 'new')} /></span><span className="record-date">{record.kind === 'payment' || record.kind === 'expense' || record.kind === 'expected_payment' || record.kind === 'tax' || record.kind === 'debt' ? money(record.data.amount) : record.kind === 'estimate' ? money(record.data.total) : formatDate(record.data.due_date || record.data.date)}</span><span className="record-related">{projectName(records, record.data.project_id) || clientName(records, record.data.client_id) || String(record.data.channel || '—')}</span><div className="row-action-wrap"><button className="icon-button row-more" aria-label={`Действия: ${title}`} aria-expanded={menuOpen} onClick={() => setMenuOpen((value) => !value)}><Icon name="more" size={16} /></button>{menuOpen && <div className="row-menu">{record.kind === 'material' && typeof record.data.file_path === 'string' && <button onClick={() => onOpenFile(record)}>Открыть файл</button>}{record.kind === 'lead' && record.data.status !== 'converted' && <button onClick={() => onConvert(record)}>Создать проект</button>}{record.kind === 'expected_payment' && record.data.status === 'expected' && <button onClick={() => onReceive(record)}>Отметить как полученную</button>}{record.kind === 'estimate' && <button onClick={() => onNewRevision(record)}>Новая версия</button>}{(record.kind !== 'estimate' || !['sent', 'approved', 'superseded'].includes(String(record.data.status))) && <button onClick={() => onEdit(record)}>Изменить</button>}<button onClick={() => onArchive(record)}>В архив</button></div>}</div></div>;
 }
 
 function StatusChip({ status }: { status: string }) {
@@ -398,9 +434,73 @@ function StatusChip({ status }: { status: string }) {
   return <span className={`status-chip status-${status}`}>{label[status] || status.replaceAll('_', ' ')}</span>;
 }
 
-function RecordBoard({ records, toggleTask, onEdit }: { records: WorkRecord[]; toggleTask: (task: WorkRecord) => void; onEdit: (record: WorkRecord) => void }) {
+function RecordBoard({ records, toggleTask, onEdit, onStatusChange }: { records: WorkRecord[]; toggleTask: (task: WorkRecord) => void; onEdit: (record: WorkRecord) => void; onStatusChange: (record: WorkRecord, status: string) => void }) {
   const columns = [{ id: 'todo', label: 'К выполнению' }, { id: 'in_progress', label: 'В работе' }, { id: 'done', label: 'Завершено' }];
-  return <div className="board-columns">{columns.map((column) => { const list = records.filter((record) => String(record.data.status || 'todo') === column.id || (column.id === 'todo' && !['in_progress', 'done'].includes(String(record.data.status)))); return <section className="board-column" key={column.id}><div className="board-column-head"><strong>{column.label}</strong><span>{list.length}</span></div>{list.map((record) => { const title = String(record.data.title || record.data.name || KIND_LABEL[record.kind]); const subtasks = record.kind === 'task' ? readSubtasks(record.data.subtasks) : []; const progress = subtasks.length ? `${subtasks.filter((item) => item.done).length}/${subtasks.length} подзадач` : ''; return <article className="board-card" key={record.id}><div className="board-card-top"><span className="board-card-kind">{KIND_LABEL[record.kind]}</span><button className="icon-button" aria-label={`Изменить: ${title}`} onClick={() => onEdit(record)}><Icon name="more" size={15} /></button></div><button className="board-card-title" onClick={() => onEdit(record)}>{title}</button><span className="board-description">{String(record.data.description || projectName(records, record.data.project_id) || '—')}{progress && <span className="subtask-progress"> · {progress}</span>}</span><div className="board-card-foot"><span><Icon name="calendar" size={13} />{formatDate(record.data.due_date)}</span>{record.kind === 'task' && <button className={`task-check small ${record.data.status === 'done' ? 'checked' : ''}`} aria-label={record.data.status === 'done' ? 'Вернуть задачу в работу' : 'Отметить задачу выполненной'} onClick={() => void toggleTask(record)}>{record.data.status === 'done' && <Icon name="check" size={12} />}</button>}</div></article>; })}</section>; })}</div>;
+  const [dragOver, setDragOver] = useState<string | null>(null);
+  function drop(event: DragEvent<HTMLElement>, status: string) {
+    event.preventDefault();
+    const id = event.dataTransfer.getData('text/workhub-record');
+    const record = records.find((item) => item.id === id);
+    if (record?.kind === 'task' && record.data.status !== status) onStatusChange(record, status);
+    setDragOver(null);
+  }
+  return <div className="board-columns">{columns.map((column) => { const list = records.filter((record) => String(record.data.status || 'todo') === column.id || (column.id === 'todo' && !['in_progress', 'done'].includes(String(record.data.status)))); return <section className={`board-column ${dragOver === column.id ? 'is-drop-target' : ''}`} key={column.id} onDragOver={(event) => { event.preventDefault(); setDragOver(column.id); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragOver(null); }} onDrop={(event) => drop(event, column.id)}><div className="board-column-head"><strong>{column.label}</strong><span>{list.length}</span></div>{list.map((record) => { const title = String(record.data.title || record.data.name || KIND_LABEL[record.kind]); const subtasks = record.kind === 'task' ? readSubtasks(record.data.subtasks) : []; const progress = subtasks.length ? `${subtasks.filter((item) => item.done).length}/${subtasks.length} подзадач` : ''; return <article className={`board-card ${record.kind === 'task' ? 'is-draggable' : ''}`} key={record.id} draggable={record.kind === 'task'} onDragStart={(event) => { event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/workhub-record', record.id); }} onDragEnd={() => setDragOver(null)}><div className="board-card-top"><span className="board-card-kind">{KIND_LABEL[record.kind]}</span><button className="icon-button" aria-label={`Изменить: ${title}`} onClick={() => onEdit(record)}><Icon name="more" size={15} /></button></div><button className="board-card-title" onClick={() => onEdit(record)}>{title}</button><span className="board-description">{String(record.data.description || projectName(records, record.data.project_id) || '—')}{progress && <span className="subtask-progress"> · {progress}</span>}</span><div className="board-card-foot"><span><Icon name="calendar" size={13} />{formatDate(record.data.due_date)}</span>{record.kind === 'task' && <select className="board-status-select" aria-label={`Статус задачи «${title}»`} value={String(record.data.status || 'todo')} onClick={(event) => event.stopPropagation()} onChange={(event) => onStatusChange(record, event.target.value)}><option value="todo">К выполнению</option><option value="in_progress">В работе</option><option value="done">Завершено</option></select>}{record.kind === 'task' && <button className={`task-check small ${record.data.status === 'done' ? 'checked' : ''}`} aria-label={record.data.status === 'done' ? 'Вернуть задачу в работу' : 'Отметить задачу выполненной'} onClick={() => void toggleTask(record)}>{record.data.status === 'done' && <Icon name="check" size={12} />}</button>}</div></article>; })}</section>; })}</div>;
+}
+
+function ProjectStageBoard({ records, allRecords, onOpenProject, onStageChange }: { records: WorkRecord[]; allRecords: WorkRecord[]; onOpenProject: (project: WorkRecord) => void; onStageChange: (project: WorkRecord, stage: string) => void }) {
+  const [dragOver, setDragOver] = useState<string | null>(null);
+  function drop(event: DragEvent<HTMLElement>, stage: string) {
+    event.preventDefault();
+    const id = event.dataTransfer.getData('text/workhub-record');
+    const project = records.find((item) => item.id === id);
+    if (project && project.data.stage !== stage) onStageChange(project, stage);
+    setDragOver(null);
+  }
+  return <div className="project-stage-board-wrap"><div className="project-stage-board-caption"><span>Этапы проектов</span><small>{projectStageOptions.length} этапов · перетащите карточку, чтобы сменить этап</small></div><div className="project-stage-board" tabIndex={0} aria-label="Доска проектов с десятью этапами, прокручивается по горизонтали">{projectStageOptions.map((stage, index) => {
+    const items = records.filter((project) => projectStageIndex(project.data.stage) === index);
+    return <section className={`project-stage-column ${dragOver === stage.value ? 'is-drop-target' : ''}`} key={stage.value} onDragOver={(event) => { event.preventDefault(); setDragOver(stage.value); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragOver(null); }} onDrop={(event) => drop(event, stage.value)}>
+      <header><span className="project-stage-number">{String(index + 1).padStart(2, '0')}</span><strong>{stage.label}</strong><span className="project-stage-count">{items.length}</span></header>
+      {items.map((project) => <button className="project-stage-card is-draggable" key={project.id} draggable onDragStart={(event) => { event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/workhub-record', project.id); }} onDragEnd={() => setDragOver(null)} onClick={() => onOpenProject(project)} aria-label={`${String(project.data.name || 'Проект')}, этап ${stage.label}. Перетащите, чтобы сменить этап.`}>
+        <strong>{String(project.data.name || 'Без названия')}</strong>
+        <span>{clientName(allRecords, project.data.client_id) || 'Клиент не выбран'}</span>
+        <small>{project.data.due_date ? `Срок · ${formatDate(project.data.due_date)}` : String(project.data.service || 'Без срока')}</small>
+      </button>)}
+    </section>;
+  })}</div></div>;
+}
+
+function ProjectWorkspace({ project, records, onBack, onEdit, onEditRelated, onAddRelated, onStageChange }: {
+  project: WorkRecord;
+  records: WorkRecord[];
+  onBack: () => void;
+  onEdit: (project: WorkRecord) => void;
+  onEditRelated: (record: WorkRecord) => void;
+  onAddRelated: (kind: Kind, project: WorkRecord) => void;
+  onStageChange: (project: WorkRecord, stage: string) => void;
+}) {
+  const related = records.filter((record) => record.data.project_id === project.id && record.data.status !== 'archived');
+  const tasks = related.filter((record) => record.kind === 'task');
+  const estimates = related.filter((record) => record.kind === 'estimate').sort((a, b) => Number(b.data.revision_number || 1) - Number(a.data.revision_number || 1));
+  const payments = related.filter((record) => record.kind === 'payment' || record.kind === 'expected_payment');
+  const materials = related.filter((record) => record.kind === 'material' || record.kind === 'reference');
+  const client = records.find((record) => record.kind === 'client' && record.id === project.data.client_id);
+  const completedTasks = tasks.filter((task) => task.data.status === 'done').length;
+  const received = payments.filter((payment) => payment.kind === 'payment' && payment.data.status === 'received').reduce((sum, payment) => sum + Number(payment.data.amount || 0), 0);
+  const currentStage = projectStageIndex(project.data.stage);
+  const actionKinds: [Kind, string][] = [['task', 'Задача'], ['estimate', 'Смета'], ['payment', 'Поступление'], ['expected_payment', 'Ожидаемая оплата'], ['material', 'Материал'], ['reference', 'Референс']];
+  return <div className="project-workspace">
+    <button className="text-button project-back" onClick={onBack}><Icon name="chevron" size={14} />К клиентам и проектам</button>
+    <header className="project-workspace-heading"><div><div className="eyebrow">ПРОЕКТ · {String(project.data.service || 'УСЛУГА НЕ УКАЗАНА').toLocaleUpperCase('ru')}</div><h1>{String(project.data.name || 'Без названия')}</h1><p>{client ? String(client.data.name || 'Клиент') : 'Клиент не выбран'}{project.data.due_date ? ` · срок ${formatDate(project.data.due_date)}` : ''}</p></div><button className="secondary-button" onClick={() => onEdit(project)}><Icon name="pen" size={15} />Изменить проект</button></header>
+    <section className="panel project-progress-panel"><div className="project-progress-heading"><div><span className="panel-kicker">ЭТАП РАБОТЫ</span><strong>{projectStageLabel(project.data.stage)}</strong></div><label className="project-stage-select"><span className="visually-hidden">Текущий этап</span><select value={String(project.data.stage || 'stage_0')} onChange={(event) => onStageChange(project, event.target.value)}>{projectStageOptions.map((stage) => <option value={stage.value} key={stage.value}>{stage.label}</option>)}</select></label></div><div className="project-stage-progress" aria-label={`Этап ${currentStage + 1} из ${projectStageOptions.length}`}>{projectStageOptions.map((stage, index) => <i key={stage.value} className={index <= currentStage ? 'reached' : ''} title={stage.label} />)}</div><div className="project-stage-labels"><span>Первый контакт</span><span>Завершен</span></div></section>
+    <div className="project-metrics"><article className="panel"><span>Задачи</span><strong>{completedTasks} <small>/ {tasks.length}</small></strong><small>выполнено</small></article><article className="panel"><span>Получено</span><strong>{money(received)}</strong><small>фактические оплаты</small></article><article className="panel"><span>Сметы</span><strong>{estimates.length}</strong><small>{estimates[0] ? `последняя · ${money(estimates[0].data.total)}` : 'пока нет'}</small></article></div>
+    <section className="project-related-section"><div className="project-related-heading"><div><span className="panel-kicker">РАБОТА ПО ПРОЕКТУ</span><h2>Связанные записи</h2></div><div className="project-quick-actions">{actionKinds.map(([kind, label]) => <button className="secondary-button" key={kind} onClick={() => onAddRelated(kind, project)}><Icon name="plus" size={14} />{label}</button>)}</div></div>
+      <div className="project-related-grid"><ProjectRelatedList title="Задачи" records={tasks} empty="Задачи проекта появятся здесь." onOpen={onEditRelated} /><ProjectRelatedList title="Сметы и КП" records={estimates} empty="Создайте первую смету для проекта." onOpen={onEditRelated} /><ProjectRelatedList title="Оплаты" records={payments} empty="Поступления и ожидания будут связаны с проектом." onOpen={onEditRelated} /><ProjectRelatedList title="Материалы и референсы" records={materials} empty="Добавьте рабочий файл или визуальный референс." onOpen={onEditRelated} /></div>
+    </section>
+  </div>;
+}
+
+function ProjectRelatedList({ title, records, empty, onOpen }: { title: string; records: WorkRecord[]; empty: string; onOpen: (record: WorkRecord) => void }) {
+  return <section className="panel project-related-card"><header><h3>{title}</h3><span>{records.length}</span></header>{records.length ? <div className="project-related-items">{records.slice(0, 4).map((record) => { const label = String(record.data.title || record.data.name || KIND_LABEL[record.kind]); const secondary = record.kind === 'payment' || record.kind === 'expected_payment' || record.kind === 'estimate' ? money(record.data.amount ?? record.data.total) : formatDate(record.data.due_date || record.data.date || record.data.publish_date); return <button key={record.id} onClick={() => onOpen(record)}><span><strong>{label}</strong><small>{secondary}</small></span><StatusChip status={String(record.data.status || 'new')} /></button>; })}</div> : <p>{empty}</p>}</section>;
 }
 
 function SimpleCalendar({ records, onEdit }: { records: WorkRecord[]; onEdit: (record: WorkRecord) => void }) {
@@ -488,11 +588,11 @@ function fieldsForKind(kind: Kind): Field[] {
   const taskFields: Field[] = [commonTitle, { name: 'description', label: 'Описание', type: 'textarea', wide: true }, { name: 'project_id', label: 'Проект', type: 'project' }, { name: 'priority', label: 'Приоритет', type: 'select', options: [{ value: 'low', label: 'Низкий' }, { value: 'normal', label: 'Обычный' }, { value: 'high', label: 'Высокий' }] }, { name: 'due_date', label: 'Дедлайн', type: 'date' }, { name: 'planned_date', label: 'Запланировать на', type: 'date', default: todayISO() }, { name: 'start_time', label: 'Начало', type: 'time' }, { name: 'end_time', label: 'Окончание', type: 'time' }, { name: 'repeat_interval', label: 'Повторять', type: 'select', default: 'none', options: [{ value: 'none', label: 'Не повторять' }, { value: 'daily', label: 'Каждый день' }, { value: 'weekly', label: 'Каждую неделю' }, { value: 'monthly', label: 'Каждый месяц' }] }, { name: 'status', label: 'Состояние', type: 'select', options: statusOptions, default: 'todo' }];
   if (kind === 'task') return taskFields;
   if (kind === 'client') return [{ name: 'name', label: 'Имя или название компании', type: 'text', required: true, wide: true }, { name: 'email', label: 'Электронная почта', type: 'email' }, { name: 'phone', label: 'Телефон', type: 'text' }, { name: 'messenger', label: 'Мессенджер', type: 'text' }, { name: 'website', label: 'Сайт', type: 'text', wide: true }];
-  if (kind === 'lead') return [{ name: 'name', label: 'Имя или компания', type: 'text', required: true, wide: true }, { name: 'email', label: 'Электронная почта', type: 'email' }, { name: 'phone', label: 'Телефон', type: 'text' }, { name: 'service', label: 'Интересующая услуга', type: 'select', options: serviceOptions }, { name: 'source', label: 'Ссылка или источник', type: 'text', wide: true }, { name: 'next_action_date', label: 'Следующее действие', type: 'date' }, { name: 'status', label: 'Состояние', type: 'select', default: 'new', options: [{ value: 'new', label: 'Новый' }, { value: 'first_contact', label: 'Первый контакт' }, { value: 'discussion', label: 'Обсуждение' }, { value: 'agreed', label: 'Договоренность' }, { value: 'rejected', label: 'Отказ' }, { value: 'paused', label: 'Отложено' }, { value: 'no_reply', label: 'Нет ответа' }] }];
-  if (kind === 'project') return [{ name: 'name', label: 'Название проекта', type: 'text', required: true, wide: true }, { name: 'client_id', label: 'Клиент', type: 'client' }, { name: 'service', label: 'Услуга', type: 'select', options: serviceOptions }, { name: 'stage', label: 'Текущий этап', type: 'select', options: projectStageOptions, default: 'first_contact' }, { name: 'due_date', label: 'Срок проекта', type: 'date' }, { name: 'status', label: 'Состояние', type: 'select', default: 'active', options: [{ value: 'active', label: 'В работе' }, { value: 'paused', label: 'Отложено' }, { value: 'done', label: 'Завершен' }] }];
+  if (kind === 'lead') return [{ name: 'name', label: 'Имя или компания', type: 'text', required: true, wide: true }, { name: 'email', label: 'Электронная почта', type: 'email' }, { name: 'phone', label: 'Телефон', type: 'text' }, { name: 'messenger', label: 'Мессенджер', type: 'text' }, { name: 'website', label: 'Сайт', type: 'text' }, { name: 'service', label: 'Интересующая услуга', type: 'select', options: serviceOptions }, { name: 'project_title', label: 'Предварительное название проекта', type: 'text', wide: true }, { name: 'source', label: 'Ссылка или источник', type: 'text', wide: true }, { name: 'next_action_date', label: 'Следующее действие', type: 'date' }, { name: 'status', label: 'Состояние', type: 'select', default: 'new', options: [{ value: 'new', label: 'Новый' }, { value: 'first_contact', label: 'Первый контакт' }, { value: 'discussion', label: 'Обсуждение' }, { value: 'agreed', label: 'Договоренность' }, { value: 'rejected', label: 'Отказ' }, { value: 'paused', label: 'Отложено' }, { value: 'no_reply', label: 'Нет ответа' }] }];
+  if (kind === 'project') return [{ name: 'name', label: 'Название проекта', type: 'text', required: true, wide: true }, { name: 'client_id', label: 'Клиент', type: 'client' }, { name: 'service', label: 'Услуга', type: 'select', options: serviceOptions }, { name: 'stage', label: 'Текущий этап', type: 'select', options: projectStageOptions, default: 'stage_0' }, { name: 'due_date', label: 'Срок проекта', type: 'date' }, { name: 'status', label: 'Состояние', type: 'select', default: 'active', options: [{ value: 'active', label: 'В работе' }, { value: 'paused', label: 'Отложено' }, { value: 'done', label: 'Завершен' }] }];
   if (kind === 'payment' || kind === 'expected_payment' || kind === 'expense' || kind === 'tax' || kind === 'debt') return [{ name: 'title', label: 'Описание', type: 'text', required: true, wide: true }, { name: 'amount', label: 'Сумма, ₽', type: 'number', required: true }, { name: kind === 'expected_payment' || kind === 'tax' || kind === 'debt' ? 'due_date' : 'date', label: kind === 'expected_payment' || kind === 'tax' || kind === 'debt' ? 'Ожидаемая дата / срок' : 'Фактическая дата', type: 'date', required: true }, { name: 'project_id', label: 'Проект', type: 'project' }, { name: 'status', label: 'Состояние', type: 'select', default: kind === 'payment' ? 'received' : kind === 'expected_payment' ? 'expected' : kind === 'tax' ? 'unpaid' : 'open', options: [{ value: 'received', label: 'Получено' }, { value: 'expected', label: 'Ожидается' }, { value: 'paid', label: 'Оплачено' }, { value: 'unpaid', label: 'Не оплачено' }, { value: 'open', label: 'Открыто' }] }, { name: 'note', label: 'Комментарий', type: 'textarea', wide: true }];
   if (kind === 'content') return [{ name: 'title', label: 'Тема публикации', type: 'text', required: true, wide: true }, { name: 'channel', label: 'Площадка', type: 'text' }, { name: 'format', label: 'Формат', type: 'text' }, { name: 'publish_date', label: 'Плановая дата', type: 'date' }, { name: 'publish_time', label: 'Время', type: 'time' }, { name: 'status', label: 'Этап подготовки', type: 'select', default: 'idea', options: [{ value: 'idea', label: 'Идея' }, { value: 'prep', label: 'Подготовка' }, { value: 'draft', label: 'Черновик' }, { value: 'ready', label: 'Готово' }, { value: 'planned', label: 'Запланировано' }, { value: 'published', label: 'Опубликовано' }, { value: 'paused', label: 'Отложено' }] }, { name: 'body', label: 'Текст или заметка', type: 'textarea', wide: true }];
-  if (kind === 'reference') return [{ name: 'title', label: 'Название референса', type: 'text', required: true, wide: true }, { name: 'url', label: 'Ссылка на источник', type: 'text', wide: true }, { name: 'categories', label: 'Категории через запятую', type: 'text', wide: true }, { name: 'note', label: 'Примечание', type: 'textarea', wide: true }];
+  if (kind === 'reference') return [{ name: 'title', label: 'Название референса', type: 'text', required: true, wide: true }, { name: 'url', label: 'Ссылка на источник', type: 'text', wide: true }, { name: 'project_id', label: 'Проект', type: 'project' }, { name: 'categories', label: 'Категории через запятую', type: 'text', wide: true }, { name: 'note', label: 'Примечание', type: 'textarea', wide: true }];
   if (kind === 'material') return [{ name: 'title', label: 'Название материала', type: 'text', required: true, wide: true }, { name: 'url', label: 'Ссылка на файл', type: 'text', wide: true }, { name: 'category', label: 'Категория', type: 'select', options: [{ value: 'brief', label: 'Брифы' }, { value: 'proposal', label: 'Коммерческие предложения' }, { value: 'template', label: 'Шаблоны' }, { value: 'document', label: 'Документы' }] }, { name: 'project_id', label: 'Проект', type: 'project' }, { name: 'note', label: 'Описание', type: 'textarea', wide: true }];
   if (kind === 'estimate') return [{ name: 'title', label: 'Название сметы', type: 'text', required: true, wide: true }, { name: 'project_id', label: 'Проект', type: 'project' }, { name: 'status', label: 'Состояние', type: 'select', default: 'draft', options: [{ value: 'draft', label: 'Черновик' }, { value: 'sent', label: 'Отправлена клиенту' }, { value: 'approved', label: 'Согласована' }] }, { name: 'items', label: 'Работы — услуга; количество; цена за единицу', type: 'textarea', wide: true, placeholder: 'Дизайн главной страницы; 1; 25000\nАдаптивная версия; 2; 5000' }];
   return [{ name: 'name', label: 'Название услуги или работы', type: 'text', required: true, wide: true }, { name: 'unit', label: 'Единица измерения', type: 'text', placeholder: 'час / страница / блок' }, { name: 'rate', label: 'Ставка, ₽', type: 'number' }];
@@ -508,6 +608,68 @@ function EmptyState({ section, onCreate }: { section: string; onCreate: () => vo
 
 function EmptyInline({ text, action, onAction }: { text: string; action: string; onAction: () => void }) { return <div className="empty-inline"><p>{text}</p><button className="text-button" onClick={onAction}><Icon name="plus" size={14} />{action}</button></div>; }
 
+function LeadConversionModal({ lead, records, onClose, onSave }: {
+  lead: WorkRecord;
+  records: WorkRecord[];
+  onClose: () => void;
+  onSave: (lead: WorkRecord, clientId: string, projectTitle: string, service: string) => Promise<void>;
+}) {
+  const leadEmail = String(lead.data.email || '').trim().toLocaleLowerCase('ru');
+  const leadPhone = normalizePhone(lead.data.phone);
+  const matchingClients = records.filter((record) => record.kind === 'client' && (
+    (leadEmail && String(record.data.email || '').trim().toLocaleLowerCase('ru') === leadEmail)
+    || (leadPhone && normalizePhone(record.data.phone) === leadPhone)
+  ));
+  const linkedClient = records.find((record) => record.kind === 'client' && record.data.source_lead_id === lead.id);
+  const [clientId, setClientId] = useState(linkedClient?.id || (matchingClients.length === 1 ? matchingClients[0].id : ''));
+  const [projectTitle, setProjectTitle] = useState(String(lead.data.project_title || `Проект — ${String(lead.data.name || '')}`.trim()));
+  const [service, setService] = useState(String(lead.data.service || ''));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setSaving(true); setError('');
+    try { await onSave(lead, clientId, projectTitle, service); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'Не удалось создать проект. Проверьте соединение и повторите попытку.'); }
+    finally { setSaving(false); }
+  }
+  useEffect(() => {
+    const previousFocus = document.activeElement as HTMLElement | null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    document.querySelector<HTMLElement>('.lead-convert-modal input')?.focus();
+    function handleKey(event: KeyboardEvent) {
+      if (event.key === 'Escape') { closeRef.current(); return; }
+      if (event.key !== 'Tab') return;
+      const focusable = Array.from(document.querySelectorAll<HTMLElement>('.lead-convert-modal button:not(:disabled), .lead-convert-modal input:not(:disabled), .lead-convert-modal select:not(:disabled)'));
+      if (!focusable.length) return;
+      const first = focusable[0]; const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+    window.addEventListener('keydown', handleKey);
+    return () => { document.body.style.overflow = previousOverflow; previousFocus?.focus(); window.removeEventListener('keydown', handleKey); };
+  }, []);
+  return <div className="modal-scrim" onMouseDown={(event) => { if (event.target === event.currentTarget && !saving) onClose(); }}>
+    <section className="modal-card lead-convert-modal" role="dialog" aria-modal="true" aria-labelledby="lead-convert-title" aria-describedby="lead-convert-description">
+      <header className="modal-heading"><div><span className="eyebrow">ПОТЕНЦИАЛЬНЫЙ КЛИЕНТ</span><h2 id="lead-convert-title">Создать проект</h2></div><button className="icon-button" aria-label="Закрыть" disabled={saving} onClick={onClose}><Icon name="close" /></button></header>
+      <p id="lead-convert-description" className="lead-convert-intro">Контакты лида «{String(lead.data.name || 'Без имени')}» будут перенесены в карточку клиента.</p>
+      {matchingClients.length > 0 && <div className="notice lead-duplicate-note" role="status"><span>Найден клиент с совпадающей почтой или телефоном. Выберите его, чтобы не создавать дубль, или явно оставьте создание нового.</span></div>}
+      <form onSubmit={(event) => void submit(event)}>
+        <div className="modal-fields">
+          <label className="field field-wide"><span>Клиент</span><select value={clientId} onChange={(event) => setClientId(event.target.value)}><option value="">Создать нового клиента</option>{records.filter((record) => record.kind === 'client').map((client) => <option key={client.id} value={client.id}>{String(client.data.name || 'Без названия')}{matchingClients.some((match) => match.id === client.id) ? ' · совпадают контакты' : ''}</option>)}</select></label>
+          <label className="field field-wide"><span>Название проекта <i>*</i></span><input required value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} autoFocus /></label>
+          <label className="field field-wide"><span>Услуга <i>*</i></span><select required value={service} onChange={(event) => setService(event.target.value)}><option value="">Выберите услугу</option>{(serviceOptions || []).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+        </div>
+        {error && <div className="form-error" role="alert">{error}</div>}
+        <div className="modal-actions"><p>Проект сохранит связь с исходным лидом.</p><button type="button" className="secondary-button" disabled={saving} onClick={onClose}>Отмена</button><button className="primary-button" disabled={saving}>{saving ? 'Создаем…' : 'Создать проект'}</button></div>
+      </form>
+    </section>
+  </div>;
+}
+
 function AssistantPage() { return <div className="page-heading"><div><div className="eyebrow">ПОМОЩЬ И ИДЕИ</div><h1>Ассистент</h1><p>Интеллектуальные функции можно подключить отдельно позже.</p></div><section className="assistant-state"><div className="assistant-icon"><Icon name="spark" size={24} /></div><span className="panel-kicker">СЕЙЧАС</span><h2>ИИ пока не подключен</h2><p>Здесь появится помощник по веб-дизайну. Сейчас WorkHub не отправляет ваши записи внешним ИИ-сервисам.</p></section></div>; }
 
 function SettingsPage({ localMode, onSignOut, monthlyGoal, setMonthlyGoal }: { localMode: boolean; onSignOut: () => void; monthlyGoal: string; setMonthlyGoal: (value: string) => void }) {
@@ -522,7 +684,7 @@ function SettingsPage({ localMode, onSignOut, monthlyGoal, setMonthlyGoal }: { l
 function sectionForKind(kind: Kind) { return Object.entries(SECTION_KINDS).find(([, values]) => values.includes(kind))?.[0] || 'home'; }
 function kindTabs(section: string): [Kind | 'all', string][] { if (section === 'projects') return [['project', 'Проекты'], ['client', 'Клиенты']]; if (section === 'calculator') return [['estimate', 'Сметы'], ['price_item', 'Прайс']]; return [['all', 'Все операции'], ['payment', 'Поступления'], ['expected_payment', 'Ожидаются'], ['expense', 'Расходы'], ['tax', 'Налоги'], ['debt', 'Долги']]; }
 function defaultKindForSection(section: string): Kind { return section === 'projects' ? 'project' : section === 'leads' ? 'lead' : section === 'money' ? 'payment' : section === 'content' ? 'content' : section === 'design' ? 'reference' : section === 'materials' ? 'material' : section === 'calculator' ? 'estimate' : 'task'; }
-function createLabel(section: string) { return section === 'home' || section === 'tasks' ? 'Добавить задачу' : section === 'projects' ? 'Создать проект' : section === 'leads' ? 'Добавить клиента' : section === 'money' ? 'Добавить запись' : section === 'content' ? 'Добавить публикацию' : section === 'design' ? 'Добавить референс' : section === 'materials' ? 'Добавить материал' : section === 'calculator' ? 'Новый расчет' : 'Создать'; }
+function createLabel(section: string) { return section === 'home' || section === 'tasks' ? 'Добавить задачу' : section === 'projects' ? 'Создать проект' : section === 'leads' ? 'Добавить лида' : section === 'money' ? 'Добавить запись' : section === 'content' ? 'Добавить публикацию' : section === 'design' ? 'Добавить референс' : section === 'materials' ? 'Добавить материал' : section === 'calculator' ? 'Новый расчет' : 'Создать'; }
 function sectionDescription(section: string) { return ({ tasks: 'Планируйте работу и держите сроки под контролем.', projects: 'Заказы, клиенты и этапы работы в одном месте.', leads: 'Потенциальные заказчики и следующие действия.', money: 'Поступления, ожидания, расходы, налоги и долги.', content: 'Идеи, черновики и календарь ручных публикаций.', design: 'Референсы по типам блоков и проектам.', materials: 'Документы, ссылки и рабочие заметки.', calculator: 'Сметы проектов и редактируемый прайс.' } as Record<string, string>)[section] || ''; }
 function syncLabel(status: string) { return ({ saved: 'Синхронизировано', syncing: 'Синхронизация…', offline: 'Нет соединения', error: 'Не удалось сохранить', local: 'Локально сохранено' } as Record<string, string>)[status] || 'Сохранено'; }
 function dueCount(tasks: WorkRecord[]) { return tasks.filter((task) => !['done', 'archived'].includes(String(task.data.status))).length; }
@@ -534,6 +696,15 @@ function parseEstimateLines(value: string) { return value.split(/\n+/).map((line
 function nextDate(value: string, interval: string) { const date = new Date(`${value}T12:00:00`); if (interval === 'daily') date.setDate(date.getDate() + 1); else if (interval === 'weekly') date.setDate(date.getDate() + 7); else if (interval === 'monthly') { const day = date.getDate(); date.setDate(1); date.setMonth(date.getMonth() + 1); date.setDate(Math.min(day, new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate())); } return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; }
 function addMonth(value: string, delta: number) { const date = new Date(`${value.slice(0, 7)}-01T12:00:00`); date.setMonth(date.getMonth() + delta); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-01`; }
 function plural(value: number, one: string, few: string, many: string) { const ten = value % 10; const hundred = value % 100; return hundred >= 11 && hundred <= 14 ? many : ten === 1 ? one : ten >= 2 && ten <= 4 ? few : many; }
-function projectStageLabel(value: unknown) { const index = typeof value === 'string' ? Number(value.replace('stage_', '')) : -1; return Number.isInteger(index) && index >= 0 && projectStageOptions[index] ? projectStageOptions[index].label : typeof value === 'string' && value ? value : 'Первый контакт'; }
+function projectStageIndex(value: unknown) {
+  if (typeof value !== 'string') return 0;
+  const legacyLabels = ['first_contact', 'brief', 'proposal', 'analysis', 'prototype', 'moodboard', 'design_concepts', 'design_mockup', 'front_end', 'complete'];
+  if (value === 'complete') return projectStageOptions.length - 1;
+  const legacyIndex = legacyLabels.indexOf(value);
+  const index = legacyIndex >= 0 ? legacyIndex : Number(value.replace('stage_', ''));
+  return Number.isInteger(index) && index >= 0 && index < projectStageOptions.length ? index : 0;
+}
+function projectStageLabel(value: unknown) { return projectStageOptions[projectStageIndex(value)]?.label || 'Первый контакт'; }
+function normalizePhone(value: unknown) { const digits = String(value || '').replace(/\D/g, ''); return digits.length === 11 && digits.startsWith('8') ? `7${digits.slice(1)}` : digits; }
 
 export default App;
